@@ -307,6 +307,8 @@ struct FrameSyncAttrs
 };
 typedef FrameSyncManager<GBS, FrameSyncAttrs> FrameSync;
 
+bool pc98NeedsReapply = true;
+
 void externalClockGenResetClock()
 {
     if (!rto->extClockGenDetected) {
@@ -3451,6 +3453,7 @@ void doPostPresetLoadSteps()
     rto->videoIsFrozen = true;       // ensures unfreeze
     rto->sourceDisconnected = false; // this must be true if we reached here (no syncwatcher operation)
     rto->boardHasPower = true;       //same
+    pc98NeedsReapply = true;
 
     if (rto->presetID == 0x06 || rto->presetID == 0x16) {
         rto->isCustomPreset = 0; // override so it applies section 2 deinterlacer settings
@@ -3681,24 +3684,56 @@ void doPostPresetLoadSteps()
             GBS::IF_HBIN_SP::write(0x60); // 1_26 works for all output presets
 
             // PC-98 Dynamic scaler fitting:
-            // 400-line DOS (vt <= 470) vs 480-line PEGC (470 < vt <= 560) vs GA / High-Res (vt > 560)
+            // 400-line DOS (420 <= vt <= 470) vs 480-line PEGC (490 <= vt <= 560) vs GA / High-Res (vt > 560)
             uint16_t currentLines = GBS::STATUS_SYNC_PROC_VTOTAL::read();
-            if (currentLines > 470 && currentLines <= 560) {
+            if (currentLines >= 490 && currentLines <= 560) {
                 // PEGC / Windows VGA 480-line mode (typical vt: 525)
                 if (rto->presetID == 0x1 || rto->presetID == 0x11) {        // 960p
                     GBS::VDS_VSCALE::write(562);
+                    GBS::IF_HB_ST2::write(0x470);
+                    GBS::IF_HB_SP2::write(0x074);
+                    GBS::IF_VB_ST::write(6);
+                    GBS::IF_VB_SP::write(8);
                 } else if (rto->presetID == 0x5 || rto->presetID == 0x15) { // 1080p
                     GBS::VDS_VSCALE::write(480);
+                    GBS::IF_HB_ST2::write(0x464);
+                    GBS::IF_HB_SP2::write(0x068);
+                    GBS::IF_VB_ST::write(6);
+                    GBS::IF_VB_SP::write(8);
+                } else if (rto->presetID == 0x4 || rto->presetID == 0x14) { // 480p
+                    GBS::VDS_VB_SP::write(24);
+                    GBS::VDS_DIS_VB_SP::write(31);
+                    GBS::VDS_DIS_VB_ST::write(527);
+                    GBS::IF_HB_ST2::write(0x47C);
+                    GBS::IF_HB_SP2::write(0x080);
+                    GBS::IF_VB_ST::write(14);
+                    GBS::IF_VB_SP::write(16);
+                } else {
+                    GBS::IF_HB_ST2::write(0x464);
+                    GBS::IF_HB_SP2::write(0x068);
+                    GBS::IF_VB_ST::write(6);
+                    GBS::IF_VB_SP::write(8);
                 }
                 GBS::PLLAD_FS::write(1); // PEGC requires High gain
                 latchPLLAD();
-            } else if (currentLines <= 470) {
+            } else if (currentLines >= 420 && currentLines <= 470) {
                 // Normal DOS 400-line mode (24kHz vt: 439, 31kHz vt: 449)
                 if (rto->presetID == 0x1 || rto->presetID == 0x11) {        // 960p
                     GBS::VDS_VSCALE::write(468);
                 } else if (rto->presetID == 0x5 || rto->presetID == 0x15) { // 1080p
                     GBS::VDS_VSCALE::write(400);
+                } else if (rto->presetID == 0x4 || rto->presetID == 0x14) { // 480p
+                    // 400-line 1:1 pixel-perfect centering with 40-line letterbox borders
+                    GBS::VDS_VB_SP::write(64);
+                    GBS::VDS_DIS_VB_SP::write(72);
+                    GBS::VDS_DIS_VB_ST::write(488);
                 }
+                GBS::IF_HB_ST2::write(0x490);
+                GBS::IF_HB_SP2::write(0x094);
+                GBS::IF_VB_ST::write(6);
+                GBS::IF_VB_SP::write(8);
+                GBS::PLLAD_FS::write(0); // DOS Low Gain (24k/31k common, zero clipping)
+                latchPLLAD();
             }
             // For currentLines > 560 (e.g. SVGA 800x600 vt: 625..666, High-Res vt: ~800),
             // retain base preset values and do not apply 480p stretch.
@@ -6777,31 +6812,86 @@ void runSyncWatcher()
             }
             else if (uopt->pc98Mode > 0 && rto->videoStandardInput == VideoMode_PC98) {
                 // PC-98 Dynamic resolution switch (400-line DOS <-> 480-line PEGC / Windows)
+                // Filter out sync jitter and unstable values by requiring 5 consecutive stable samples
                 static uint16_t lastPc98SourceLines = 0;
-                if (sourceLines != 0 && abs((int)sourceLines - (int)lastPc98SourceLines) > 15) {
-                    lastPc98SourceLines = sourceLines;
-                    if (sourceLines > 470 && sourceLines <= 560) {
-                        // 480-line PEGC / Windows VGA (vt ≒ 525)
-                        if (rto->presetID == 0x05 || rto->presetID == 0x15) {
-                            GBS::VDS_VSCALE::write(480);
-                        } else if (rto->presetID == 0x01 || rto->presetID == 0x11) {
-                            GBS::VDS_VSCALE::write(562);
+                static uint8_t lastPresetID = 0xFF;
+                static uint16_t candidatePc98Lines = 0;
+                static uint8_t pc98StableSamples = 0;
+
+                // Only consider valid signal ranges: 400-line DOS (420..470) or 480-line PEGC (490..560)
+                if ((sourceLines >= 420 && sourceLines <= 470) || (sourceLines >= 490 && sourceLines <= 560)) {
+                    if (abs((int)sourceLines - (int)lastPc98SourceLines) > 15 || rto->presetID != lastPresetID || pc98NeedsReapply) {
+                        if (candidatePc98Lines != 0 && abs((int)sourceLines - (int)candidatePc98Lines) <= 5) {
+                            pc98StableSamples++;
+                            if (pc98StableSamples >= 5) {
+                                lastPc98SourceLines = sourceLines;
+                                lastPresetID = rto->presetID;
+                                pc98NeedsReapply = false;
+                                pc98StableSamples = 0;
+                                candidatePc98Lines = 0;
+
+                                if (sourceLines >= 490 && sourceLines <= 560) {
+                                    // 480-line PEGC / Windows VGA (vt ≒ 525)
+                                    if (rto->presetID == 0x05 || rto->presetID == 0x15) { // 1080p
+                                        GBS::VDS_VSCALE::write(480);
+                                        GBS::IF_HB_ST2::write(0x464);
+                                        GBS::IF_HB_SP2::write(0x068);
+                                        GBS::IF_VB_ST::write(6);
+                                        GBS::IF_VB_SP::write(8);
+                                    } else if (rto->presetID == 0x01 || rto->presetID == 0x11) { // 960p
+                                        GBS::VDS_VSCALE::write(562);
+                                        GBS::IF_HB_ST2::write(0x470);
+                                        GBS::IF_HB_SP2::write(0x074);
+                                        GBS::IF_VB_ST::write(6);
+                                        GBS::IF_VB_SP::write(8);
+                                    } else if (rto->presetID == 0x04 || rto->presetID == 0x14) { // 480p
+                                        // 480-line PEGC: full 480 vertical height
+                                        GBS::VDS_VB_SP::write(24);
+                                        GBS::VDS_DIS_VB_SP::write(31);
+                                        GBS::VDS_DIS_VB_ST::write(527);
+                                        GBS::IF_HB_ST2::write(0x47C);
+                                        GBS::IF_HB_SP2::write(0x080);
+                                        GBS::IF_VB_ST::write(14);
+                                        GBS::IF_VB_SP::write(16);
+                                    } else {
+                                        GBS::IF_HB_ST2::write(0x464);
+                                        GBS::IF_HB_SP2::write(0x068);
+                                        GBS::IF_VB_ST::write(6);
+                                        GBS::IF_VB_SP::write(8);
+                                    }
+                                    GBS::PLLAD_FS::write(1); // PEGC High Gain
+                                    latchPLLAD();
+                                    SerialM.println(F("PC-98 dynamic scale updated: 480p (PEGC)"));
+                                } else if (sourceLines >= 420 && sourceLines <= 470) {
+                                    // 400-line DOS (24kHz vt ≒ 439 / 31kHz vt ≒ 449)
+                                    if (rto->presetID == 0x05 || rto->presetID == 0x15) {
+                                        GBS::VDS_VSCALE::write(400);
+                                    } else if (rto->presetID == 0x01 || rto->presetID == 0x11) {
+                                        GBS::VDS_VSCALE::write(468);
+                                    } else if (rto->presetID == 0x04 || rto->presetID == 0x14) {
+                                        // 400-line DOS: 1:1 pixel-perfect centering with letterbox borders
+                                        GBS::VDS_VB_SP::write(64);
+                                        GBS::VDS_DIS_VB_SP::write(72);
+                                        GBS::VDS_DIS_VB_ST::write(488);
+                                    }
+                                    GBS::IF_HB_ST2::write(0x490);
+                                    GBS::IF_HB_SP2::write(0x094);
+                                    GBS::IF_VB_ST::write(6);
+                                    GBS::IF_VB_SP::write(8);
+                                    GBS::PLLAD_FS::write(0); // DOS Low Gain (24k/31k common, zero clipping)
+                                    latchPLLAD();
+                                    SerialM.println(F("PC-98 dynamic scale updated: 400p (DOS)"));
+                                }
+                            }
+                        } else {
+                            candidatePc98Lines = sourceLines;
+                            pc98StableSamples = 1;
                         }
-                        GBS::PLLAD_FS::write(1); // PEGC High Gain
-                        latchPLLAD();
-                        SerialM.println(F("PC-98 dynamic scale updated: 480p (PEGC)"));
-                    } else if (sourceLines <= 470) {
-                        // 400-line DOS (24kHz vt ≒ 439 / 31kHz vt ≒ 449)
-                        if (rto->presetID == 0x05 || rto->presetID == 0x15) {
-                            GBS::VDS_VSCALE::write(400);
-                        } else if (rto->presetID == 0x01 || rto->presetID == 0x11) {
-                            GBS::VDS_VSCALE::write(468);
-                        }
-                        GBS::PLLAD_FS::write(0); // DOS Low Gain (24k/31k common, zero clipping)
-                        latchPLLAD();
-                        SerialM.println(F("PC-98 dynamic scale updated: 400p (DOS)"));
+                    } else {
+                        // lines matched current active mode, reset candidate tracking
+                        candidatePc98Lines = 0;
+                        pc98StableSamples = 0;
                     }
-                    // For sourceLines > 560 (GA / High-Res), preserve settings without 480p stretch
                 }
             }
             // if currently in scaling RGB/HV, check for "SD" < > "EDTV" style source changes
