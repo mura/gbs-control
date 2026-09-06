@@ -3277,13 +3277,61 @@ void applyPc98Timings()
 
     // Vertical blanking pulse (NOT active video range!)
     GBS::IF_VB_ST::write(6);
-    GBS::IF_VB_SP::write(8);
-
-    // Input capture window unified for all output resolutions (1080p, 960p, 720p, 480p):
-    // PLLAD_MD = 2345 standard line width and optimal zero-clipping window
+    // Input capture window and scaling fitting based on source lines:
     GBS::IF_HSYNC_RST::write(1279);
-    GBS::IF_HB_ST2::write(0x490);
-    GBS::IF_HB_SP2::write(0x094);
+    uint16_t currentVt = GBS::STATUS_SYNC_PROC_VTOTAL::read();
+    if (currentVt >= 800 && currentVt <= 1150) {
+        currentVt /= 2; // Normalize double-rate VTOTAL
+    }
+
+    if (currentVt >= 490 && currentVt <= 560) {
+        // PEGC / Windows VGA 480-line mode (typical vt: 525)
+        if (rto->presetID == 0x05 || rto->presetID == 0x15) { // 1080p
+            GBS::VDS_VSCALE::write(480);
+            GBS::IF_HB_ST2::write(0x464);
+            GBS::IF_HB_SP2::write(0x068);
+            GBS::IF_VB_ST::write(6);
+            GBS::IF_VB_SP::write(8);
+        } else if (rto->presetID == 0x01 || rto->presetID == 0x11) { // 960p
+            GBS::VDS_VSCALE::write(562);
+            GBS::IF_HB_ST2::write(0x470);
+            GBS::IF_HB_SP2::write(0x074);
+            GBS::IF_VB_ST::write(6);
+            GBS::IF_VB_SP::write(8);
+        } else if (rto->presetID == 0x04 || rto->presetID == 0x14) { // 480p
+            GBS::VDS_VB_SP::write(24);
+            GBS::VDS_DIS_VB_SP::write(31);
+            GBS::VDS_DIS_VB_ST::write(527);
+            GBS::IF_HB_ST2::write(0x47C);
+            GBS::IF_HB_SP2::write(0x080);
+            GBS::IF_VB_ST::write(14);
+            GBS::IF_VB_SP::write(16);
+        } else {
+            GBS::IF_HB_ST2::write(0x464);
+            GBS::IF_HB_SP2::write(0x068);
+            GBS::IF_VB_ST::write(6);
+            GBS::IF_VB_SP::write(8);
+        }
+        GBS::PLLAD_FS::write(1); // PEGC High Gain
+        latchPLLAD();
+    } else {
+        // DOS 400-line mode (24kHz vt: 439, 31kHz vt: 449)
+        if (rto->presetID == 0x05 || rto->presetID == 0x15) { // 1080p
+            GBS::VDS_VSCALE::write(400);
+        } else if (rto->presetID == 0x01 || rto->presetID == 0x11) { // 960p
+            GBS::VDS_VSCALE::write(468);
+        } else if (rto->presetID == 0x04 || rto->presetID == 0x14) { // 480p
+            GBS::VDS_VB_SP::write(64);
+            GBS::VDS_DIS_VB_SP::write(72);
+            GBS::VDS_DIS_VB_ST::write(488);
+        }
+        GBS::IF_HB_ST2::write(0x490);
+        GBS::IF_HB_SP2::write(0x094);
+        GBS::IF_VB_ST::write(6);
+        GBS::IF_VB_SP::write(8);
+        GBS::PLLAD_FS::write(0); // DOS Low Gain
+        latchPLLAD();
+    }
 
     if (rto->presetID == 0x15 || rto->presetID == 0x05) { // 1080p
         SerialM.println(F("Dedicated PC-98 1080p preset active (PC-98 -> 1920x1080 @ 60Hz)"));
@@ -3686,6 +3734,9 @@ void doPostPresetLoadSteps()
             // PC-98 Dynamic scaler fitting:
             // 400-line DOS (420 <= vt <= 470) vs 480-line PEGC (490 <= vt <= 560) vs GA / High-Res (vt > 560)
             uint16_t currentLines = GBS::STATUS_SYNC_PROC_VTOTAL::read();
+            if (currentLines >= 800 && currentLines <= 1150) {
+                currentLines /= 2;
+            }
             if (currentLines >= 490 && currentLines <= 560) {
                 // PEGC / Windows VGA 480-line mode (typical vt: 525)
                 if (rto->presetID == 0x1 || rto->presetID == 0x11) {        // 960p
@@ -6812,6 +6863,10 @@ void runSyncWatcher()
             }
             else if (uopt->pc98Mode > 0 && rto->videoStandardInput == VideoMode_PC98) {
                 // PC-98 Dynamic resolution switch (400-line DOS <-> 480-line PEGC / Windows)
+                // Normalize double-rate VTOTAL (800..1150)
+                if (sourceLines >= 800 && sourceLines <= 1150) {
+                    sourceLines /= 2;
+                }
                 // Filter out sync jitter and unstable values by requiring 5 consecutive stable samples
                 static uint16_t lastPc98SourceLines = 0;
                 static uint8_t lastPresetID = 0xFF;
