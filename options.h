@@ -36,8 +36,10 @@ struct userOptions
     uint8_t wantFullHeight;
     uint8_t enableCalibrationADC;
     uint8_t scanlineStrength;
+    uint8_t pc98Mode; // 0 - off, 1 - on (PC-98 24kHz / 31kHz auto)
 };
 
+constexpr uint8_t VideoMode_PC98 = 98;
 
 // runTimeOptions holds system variables
 struct runTimeOptions
@@ -45,7 +47,7 @@ struct runTimeOptions
     uint32_t freqExtClockGen;
     uint16_t noSyncCounter; // is always at least 1 when checking value in syncwatcher
     uint8_t presetVlineShift;
-    uint8_t videoStandardInput; // 0 - unknown, 1 - NTSC like, 2 - PAL like, 3 480p NTSC, 4 576p PAL
+    uint8_t videoStandardInput; // 0 - unknown, 1 - NTSC like, 2 - PAL like, 3 480p NTSC, 4 576p PAL, 8 med res, 14 VGA, 98 PC-98
     uint8_t phaseSP;
     uint8_t phaseADC;
     uint8_t currentLevelSOG;
