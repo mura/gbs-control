@@ -1585,6 +1585,25 @@ section[name="alert"] {
               </tr>
               <tr>
                 <td>
+                  PC-98 Mode (24kHz / 31kHz -> 60Hz)
+                  <!-- prettier-ignore -->
+                  <ul class="gbs-help">
+                    <li>Dedicated compatibility mode for NEC PC-9801 / PC-9821 series.</li>
+                    <li>Automatically handles both 24kHz (56.4Hz) and 31kHz (70.1Hz) 640x400 signals with 60Hz frame rate conversion and dedicated 1080p / 960p / 480p scaling.</li>
+                  </ul>
+                </td>
+                <td
+                  gbs-message="9"
+                  gbs-message-type="user"
+                  gbs-click="normal"
+                  class="gbs-icon"
+                  gbs-toggle-switch="pc98Mode"
+                >
+                  toggle_off
+                </td>
+              </tr>
+              <tr>
+                <td>
                   Output RGBHV/Component
                   <!-- prettier-ignore -->
                   <ul class="gbs-help">
@@ -2495,6 +2514,9 @@ const createWebSocket = () => {
                             break;
                         case "disableExternalClockGenerator":
                             toggleMethod(button, (optionByte2 & 0x04) == 0x04);
+                            break;
+                        case "pc98Mode":
+                            toggleMethod(button, (optionByte2 & 0x08) == 0x08);
                             break;
                     }
                 });
