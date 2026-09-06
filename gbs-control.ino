@@ -3277,6 +3277,12 @@ void applyPc98Timings()
     GBS::IF_VB_ST::write(6);
     GBS::IF_VB_SP::write(8);
 
+    // Input capture window unified for all output resolutions (1080p, 960p, 720p, 480p):
+    // PLLAD_MD = 2345 standard line width and optimal zero-clipping window
+    GBS::IF_HSYNC_RST::write(1279);
+    GBS::IF_HB_ST2::write(0x490);
+    GBS::IF_HB_SP2::write(0x094);
+
     if (rto->presetID == 0x15 || rto->presetID == 0x05) { // 1080p
         SerialM.println(F("Dedicated PC-98 1080p preset active (PC-98 -> 1920x1080 @ 60Hz)"));
     } else if (rto->presetID == 0x11 || rto->presetID == 0x01) { // 960p
