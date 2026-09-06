@@ -399,12 +399,53 @@ bool osdMenuHanlder(OLEDMenuManager *manager, OLEDMenuItem *, OLEDMenuNav nav, b
     }
     return true;
 }
+bool pc98MenuHandler(OLEDMenuManager *manager, OLEDMenuItem *item, OLEDMenuNav, bool isFirstTime)
+{
+    if (!isFirstTime) {
+        if (millis() - oledMenuFreezeStartTime >= oledMenuFreezeTimeoutInMS) {
+            manager->unfreeze();
+        }
+        return false;
+    }
+    oledMenuFreezeTimeoutInMS = 1000;
+    oledMenuFreezeStartTime = millis();
+    OLEDDisplay *display = manager->getDisplay();
+    display->clear();
+    display->setColor(OLEDDISPLAY_COLOR::WHITE);
+    display->setFont(ArialMT_Plain_16);
+    display->setTextAlignment(OLEDDISPLAY_TEXT_ALIGNMENT::TEXT_ALIGN_CENTER);
+    display->drawString(OLED_MENU_WIDTH / 2, 16, item->str);
+    display->drawXbm((OLED_MENU_WIDTH - TEXT_LOADED_WIDTH) / 2, OLED_MENU_HEIGHT / 2, IMAGE_ITEM(TEXT_LOADED));
+    display->display();
+
+    switch (item->tag) {
+        case MT_PC98_ON:
+            uopt->pc98Mode = 1;
+            rto->videoStandardInput = VideoMode_PC98;
+            applyPresets(VideoMode_PC98);
+            break;
+        case MT_PC98_OFF:
+        default:
+            uopt->pc98Mode = 0;
+            applyPresets(getVideoMode());
+            break;
+    }
+    saveUserPrefs();
+    manager->freeze();
+    return false;
+}
+
 void initOLEDMenu()
 {
     OLEDMenuItem *root = oledMenu.rootItem;
 
     // OSD Menu
     oledMenu.registerItem(root, MT_NULL, IMAGE_ITEM(OM_OSD), osdMenuHanlder);
+
+    // PC-98 Menu
+    OLEDMenuItem *pc98Menu = oledMenu.registerItem(root, MT_NULL, "PC-98 Mode");
+    oledMenu.registerItem(pc98Menu, MT_PC98_OFF, "PC-98: Off", pc98MenuHandler);
+    oledMenu.registerItem(pc98Menu, MT_PC98_ON, "PC-98: On", pc98MenuHandler);
 
     // Resolutions
     OLEDMenuItem *resMenu = oledMenu.registerItem(root, MT_NULL, IMAGE_ITEM(OM_RESOLUTION));
