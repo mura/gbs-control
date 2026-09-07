@@ -387,3 +387,6 @@ ASALocalRun/
 .vscode/launch.json
 .vscode/ipch
 i18n_preview*.jpg
+compile_commands.json
+scratch/
+gbs-control.ino.cpp

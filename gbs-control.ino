@@ -7,6 +7,8 @@
 #include "ntsc_1280x720.h"
 #include "ntsc_1280x1024.h"
 #include "ntsc_1920x1080.h"
+#include "pc98_1920x1080.h"
+#include "pc98_1280x960.h"
 #include "ntsc_downscale.h"
 #include "pal_1280x720.h"
 #include "pal_1280x1024.h"
@@ -304,6 +306,8 @@ struct FrameSyncAttrs
                                                       // to debug: syncTargetPhase = 343 lockInterval = 15 * 16
 };
 typedef FrameSyncManager<GBS, FrameSyncAttrs> FrameSync;
+
+bool pc98NeedsReapply = true;
 
 void externalClockGenResetClock()
 {
@@ -1872,6 +1876,8 @@ void shiftHorizontal(uint16_t amountToShift, bool subtracting)
     uint16_t hrst = GBS::VDS_HSYNC_RST::read();
     uint16_t hbst = GBS::VDS_HB_ST::read();
     uint16_t hbsp = GBS::VDS_HB_SP::read();
+    uint16_t hbstd = GBS::VDS_DIS_HB_ST::read();
+    uint16_t hbspd = GBS::VDS_DIS_HB_SP::read();
 
     // Perform the addition/subtraction
     if (subtracting) {
@@ -1885,13 +1891,19 @@ void shiftHorizontal(uint16_t amountToShift, bool subtracting)
         } else {
             hbsp = hrst - (amountToShift - hbsp);
         }
+        if ((int16_t)hbstd - amountToShift >= 0) {
+            hbstd -= amountToShift;
+        } else {
+            hbstd = hrst - (amountToShift - hbstd);
+        }
+        if ((int16_t)hbspd - amountToShift >= 0) {
+            hbspd -= amountToShift;
+        } else {
+            hbspd = hrst - (amountToShift - hbspd);
+        }
     } else {
         if ((int16_t)hbst + amountToShift <= hrst) {
             hbst += amountToShift;
-            // also extend hbst_d to maximum hrst-1
-            if (hbst > GBS::VDS_DIS_HB_ST::read()) {
-                GBS::VDS_DIS_HB_ST::write(hbst);
-            }
         } else {
             hbst = 0 + (amountToShift - (hrst - hbst));
         }
@@ -1900,12 +1912,22 @@ void shiftHorizontal(uint16_t amountToShift, bool subtracting)
         } else {
             hbsp = 0 + (amountToShift - (hrst - hbsp));
         }
+        if ((int16_t)hbstd + amountToShift <= hrst) {
+            hbstd += amountToShift;
+        } else {
+            hbstd = 0 + (amountToShift - (hrst - hbstd));
+        }
+        if ((int16_t)hbspd + amountToShift <= hrst) {
+            hbspd += amountToShift;
+        } else {
+            hbspd = 0 + (amountToShift - (hrst - hbspd));
+        }
     }
 
     GBS::VDS_HB_ST::write(hbst);
     GBS::VDS_HB_SP::write(hbsp);
-    //Serial.print("hbst: "); Serial.println(hbst);
-    //Serial.print("hbsp: "); Serial.println(hbsp);
+    GBS::VDS_DIS_HB_ST::write(hbstd);
+    GBS::VDS_DIS_HB_SP::write(hbspd);
 }
 
 void shiftHorizontalLeft()
@@ -2323,7 +2345,7 @@ void shiftVerticalUpIF()
     uint8_t offset = rto->videoStandardInput == 2 ? 4 : 1;
     uint16_t sourceLines = GBS::VPERIOD_IF::read() - offset;
     // add an override for sourceLines, in case where the IF data is not available
-    if ((GBS::GBS_OPTION_SCALING_RGBHV::read() == 1) && rto->videoStandardInput == 14) {
+    if ((GBS::GBS_OPTION_SCALING_RGBHV::read() == 1) && (rto->videoStandardInput == 14 || rto->videoStandardInput == VideoMode_PC98)) {
         sourceLines = GBS::STATUS_SYNC_PROC_VTOTAL::read();
     }
     int16_t stop = GBS::IF_VB_SP::read();
@@ -2345,7 +2367,7 @@ void shiftVerticalDownIF()
     uint8_t offset = rto->videoStandardInput == 2 ? 4 : 1;
     uint16_t sourceLines = GBS::VPERIOD_IF::read() - offset;
     // add an override for sourceLines, in case where the IF data is not available
-    if ((GBS::GBS_OPTION_SCALING_RGBHV::read() == 1) && rto->videoStandardInput == 14) {
+    if ((GBS::GBS_OPTION_SCALING_RGBHV::read() == 1) && (rto->videoStandardInput == 14 || rto->videoStandardInput == VideoMode_PC98)) {
         sourceLines = GBS::STATUS_SYNC_PROC_VTOTAL::read();
     }
 
@@ -2880,8 +2902,8 @@ boolean applyBestHTotal(uint16_t bestHTotal)
 
     boolean isLargeDiff = (diffHTotalUnsigned > (orig_htotal * 0.06f)) ? true : false; // typical diff: 1802 to 1794 (=8)
 
-    if (isLargeDiff && (getVideoMode() == 8 || rto->videoStandardInput == 14)) {
-        // arcade stuff syncs down from 60 to 52 Hz..
+    if (isLargeDiff && (getVideoMode() == 8 || rto->videoStandardInput == 14 || rto->videoStandardInput == VideoMode_PC98)) {
+        // arcade stuff syncs down from 60 to 52 Hz.. PC-98 is 56.4Hz / 70Hz
         isLargeDiff = (diffHTotalUnsigned > (orig_htotal * 0.16f)) ? true : false;
     }
 
@@ -2891,7 +2913,7 @@ boolean applyBestHTotal(uint16_t bestHTotal)
 
     // rto->forceRetime = true means the correction should be forced (command '.')
     if (isLargeDiff && (rto->forceRetime == false)) {
-        if (rto->videoStandardInput != 14) {
+        if (rto->videoStandardInput != 14 && rto->videoStandardInput != VideoMode_PC98) {
             rto->failRetryAttempts++;
             if (rto->failRetryAttempts < 8) {
                 SerialM.println(F("retry"));
@@ -3223,8 +3245,107 @@ uint32_t getPllRate()
 
 #define AUTO_GAIN_INIT 0x48
 
+void applyPc98Timings()
+{
+    if (uopt->pc98Mode == 0 || (rto->videoStandardInput != VideoMode_PC98 && rto->videoStandardInput != 8)) return;
+
+    SerialM.println(F("Applying PC-98 mode (24kHz / 31kHz -> 60Hz)"));
+    rto->videoStandardInput = VideoMode_PC98; // PC-98 standard
+    GBS::GBS_OPTION_SCALING_RGBHV::write(1);
+    GBS::ADC_FLTR::write(1);
+    GBS::PLLAD_ICP::write(6);
+    GBS::PLLAD_KS::write(1);
+    setOverSampleRatio(2, true);
+    GBS::IF_HS_DEC_FACTOR::write(0);
+    GBS::IF_LD_SEL_PROV::write(0);
+    GBS::IF_LD_RAM_BYPS::write(1);
+    GBS::IF_PRGRSV_CNTRL::write(1);
+    GBS::IF_SEL_WEN::write(1);
+    GBS::IF_HS_SEL_LPF::write(0);
+    GBS::IF_HS_TAP11_BYPS::write(0);
+    GBS::IF_HS_Y_PDELAY::write(3);
+    GBS::VDS_V_DELAY::write(1);
+    GBS::MADPT_Y_DELAY_UV_DELAY::write(1);
+    GBS::VDS_Y_DELAY::write(3);
+
+    // Deinterlacer filter bypasses for clean progressive output
+    GBS::MAPDT_VT_SEL_PRGV::write(1);
+    GBS::MADPT_HTAP_BYPS::write(1);
+    GBS::MADPT_VTAP2_BYPS::write(1);
+
+    applyRGBPatches();
+
+    // Vertical blanking pulse (NOT active video range!)
+    GBS::IF_VB_ST::write(6);
+    // Input capture window and scaling fitting based on source lines:
+    GBS::IF_HSYNC_RST::write(1279);
+    uint16_t currentVt = GBS::STATUS_SYNC_PROC_VTOTAL::read();
+    if (currentVt >= 800 && currentVt <= 1150) {
+        currentVt /= 2; // Normalize double-rate VTOTAL
+    }
+
+    if (currentVt >= 490 && currentVt <= 560) {
+        // PEGC / Windows VGA 480-line mode (typical vt: 525)
+        if (rto->presetID == 0x05 || rto->presetID == 0x15) { // 1080p
+            GBS::VDS_VSCALE::write(480);
+            GBS::IF_HB_ST2::write(0x464);
+            GBS::IF_HB_SP2::write(0x068);
+            GBS::IF_VB_ST::write(6);
+            GBS::IF_VB_SP::write(8);
+        } else if (rto->presetID == 0x01 || rto->presetID == 0x11) { // 960p
+            GBS::VDS_VSCALE::write(562);
+            GBS::IF_HB_ST2::write(0x470);
+            GBS::IF_HB_SP2::write(0x074);
+            GBS::IF_VB_ST::write(6);
+            GBS::IF_VB_SP::write(8);
+        } else if (rto->presetID == 0x04 || rto->presetID == 0x14) { // 480p
+            GBS::VDS_VB_SP::write(24);
+            GBS::VDS_DIS_VB_SP::write(31);
+            GBS::VDS_DIS_VB_ST::write(527);
+            GBS::IF_HB_ST2::write(0x47C);
+            GBS::IF_HB_SP2::write(0x080);
+            GBS::IF_VB_ST::write(14);
+            GBS::IF_VB_SP::write(16);
+        } else {
+            GBS::IF_HB_ST2::write(0x464);
+            GBS::IF_HB_SP2::write(0x068);
+            GBS::IF_VB_ST::write(6);
+            GBS::IF_VB_SP::write(8);
+        }
+        GBS::PLLAD_FS::write(1); // PEGC High Gain
+        latchPLLAD();
+    } else {
+        // DOS 400-line mode (24kHz vt: 439, 31kHz vt: 449)
+        if (rto->presetID == 0x05 || rto->presetID == 0x15) { // 1080p
+            GBS::VDS_VSCALE::write(400);
+        } else if (rto->presetID == 0x01 || rto->presetID == 0x11) { // 960p
+            GBS::VDS_VSCALE::write(468);
+        } else if (rto->presetID == 0x04 || rto->presetID == 0x14) { // 480p
+            GBS::VDS_VB_SP::write(64);
+            GBS::VDS_DIS_VB_SP::write(72);
+            GBS::VDS_DIS_VB_ST::write(488);
+        }
+        GBS::IF_HB_ST2::write(0x490);
+        GBS::IF_HB_SP2::write(0x094);
+        GBS::IF_VB_ST::write(6);
+        GBS::IF_VB_SP::write(8);
+        GBS::PLLAD_FS::write(0); // DOS Low Gain
+        latchPLLAD();
+    }
+
+    if (rto->presetID == 0x15 || rto->presetID == 0x05) { // 1080p
+        SerialM.println(F("Dedicated PC-98 1080p preset active (PC-98 -> 1920x1080 @ 60Hz)"));
+    } else if (rto->presetID == 0x11 || rto->presetID == 0x01) { // 960p
+        SerialM.println(F("Dedicated PC-98 960p preset active (PC-98 -> 1280x960 @ 60Hz)"));
+    }
+
+    rto->presetIsPalForce60 = 0;
+    rto->autoBestHtotalEnabled = 0;
+}
+
 void doPostPresetLoadSteps()
 {
+    // ...
     //unsigned long postLoadTimer = millis();
 
     // adco->r_gain gets applied if uopt->enableAutoGain is set.
@@ -3265,7 +3386,24 @@ void doPostPresetLoadSteps()
     if (!rto->isCustomPreset) {
         prepareSyncProcessor(); // todo: handle modes 14 and 15 better, now that they support scaling
     }
-    if (rto->videoStandardInput == 14) {
+    if (rto->videoStandardInput == VideoMode_PC98) {
+        // PC-98 RGBHV SyncProcessor setup (dedicated)
+        GBS::SP_SOG_SRC_SEL::write(0);  // 5_20 0 | 0: from ADC 1: from hs // use ADC and turn it off = no SOG
+        GBS::ADC_SOGEN::write(1);       // 5_02 0 ADC SOG // suppress SOG decoding
+        GBS::SP_EXT_SYNC_SEL::write(0); // connect HV input ( 5_20 bit 3 )
+        GBS::SP_SOG_MODE::write(0);     // 5_56 bit 0 // normal RGBHV
+        GBS::SP_NO_COAST_REG::write(1); // vblank coasting off
+        GBS::SP_PRE_COAST::write(0);
+        GBS::SP_POST_COAST::write(0);
+        GBS::SP_H_PULSE_IGNOR::write(0xff); // cancel out SOG decoding
+        GBS::SP_SYNC_BYPS::write(0);        // output processed sync
+        GBS::SP_HS_POL_ATO::write(1);       // auto polarity
+        GBS::SP_VS_POL_ATO::write(1);
+        GBS::SP_HS_LOOP_SEL::write(1);      // bypass input to HDBYPASS
+        GBS::SP_H_PROTECT::write(0);        // disable for H/V
+        rto->phaseADC = 16;
+        rto->phaseSP = 8;
+    } else if (rto->videoStandardInput == 14) {
         // copy of code in bypassModeSwitch_RGBHV
         if (rto->syncTypeCsync == false) {
             GBS::SP_SOG_SRC_SEL::write(0);  // 5_20 0 | 0: from ADC 1: from hs // use ADC and turn it off = no SOG
@@ -3363,6 +3501,7 @@ void doPostPresetLoadSteps()
     rto->videoIsFrozen = true;       // ensures unfreeze
     rto->sourceDisconnected = false; // this must be true if we reached here (no syncwatcher operation)
     rto->boardHasPower = true;       //same
+    pc98NeedsReapply = true;
 
     if (rto->presetID == 0x06 || rto->presetID == 0x16) {
         rto->isCustomPreset = 0; // override so it applies section 2 deinterlacer settings
@@ -3370,7 +3509,8 @@ void doPostPresetLoadSteps()
 
     if (!rto->isCustomPreset) {
         if (rto->videoStandardInput == 3 || rto->videoStandardInput == 4 ||
-            rto->videoStandardInput == 8 || rto->videoStandardInput == 9) {
+            rto->videoStandardInput == 8 || rto->videoStandardInput == 9 ||
+            rto->videoStandardInput == VideoMode_PC98) {
             GBS::IF_LD_RAM_BYPS::write(1); // 1_0c 0 no LD, do this before setIfHblankParameters
         }
 
@@ -3479,7 +3619,8 @@ void doPostPresetLoadSteps()
             }
         }
         if (rto->videoStandardInput == 3 || rto->videoStandardInput == 4 ||
-            rto->videoStandardInput == 8 || rto->videoStandardInput == 9) {
+            rto->videoStandardInput == 8 || rto->videoStandardInput == 9 ||
+            rto->videoStandardInput == VideoMode_PC98) {
             // EDTV p-scan, need to either double adc data rate and halve vds scaling
             // or disable line doubler (better) (50 / 60Hz shared)
 
@@ -3580,8 +3721,74 @@ void doPostPresetLoadSteps()
             GBS::IF_HS_DEC_FACTOR::write(0);
             GBS::INPUT_FORMATTER_02::write(0x74);
             GBS::VDS_Y_DELAY::write(3);
-        } else if (rto->videoStandardInput == 8) { // 25khz
-            // todo: this mode for HV sync
+        } else if (rto->videoStandardInput == VideoMode_PC98) {
+            // PC-98 unified standard (24kHz 400p / 31kHz 400p / PEGC 480p / GA)
+            uint32_t pllRate = 0;
+            GBS::PLLAD_FS::write(0); // PC-98 400-line DOS (24k/31k) default: Low gain for zero horizontal clipping
+            latchPLLAD();
+            GBS::PLLAD_ICP::write(6);
+            GBS::ADC_FLTR::write(1);  // 5_03
+            GBS::IF_HB_ST::write(30); // 1_10; magic number
+            GBS::IF_HBIN_SP::write(0x60); // 1_26 works for all output presets
+
+            // PC-98 Dynamic scaler fitting:
+            // 400-line DOS (420 <= vt <= 470) vs 480-line PEGC (490 <= vt <= 560) vs GA / High-Res (vt > 560)
+            uint16_t currentLines = GBS::STATUS_SYNC_PROC_VTOTAL::read();
+            if (currentLines >= 800 && currentLines <= 1150) {
+                currentLines /= 2;
+            }
+            if (currentLines >= 490 && currentLines <= 560) {
+                // PEGC / Windows VGA 480-line mode (typical vt: 525)
+                if (rto->presetID == 0x1 || rto->presetID == 0x11) {        // 960p
+                    GBS::VDS_VSCALE::write(562);
+                    GBS::IF_HB_ST2::write(0x470);
+                    GBS::IF_HB_SP2::write(0x074);
+                    GBS::IF_VB_ST::write(6);
+                    GBS::IF_VB_SP::write(8);
+                } else if (rto->presetID == 0x5 || rto->presetID == 0x15) { // 1080p
+                    GBS::VDS_VSCALE::write(480);
+                    GBS::IF_HB_ST2::write(0x464);
+                    GBS::IF_HB_SP2::write(0x068);
+                    GBS::IF_VB_ST::write(6);
+                    GBS::IF_VB_SP::write(8);
+                } else if (rto->presetID == 0x4 || rto->presetID == 0x14) { // 480p
+                    GBS::VDS_VB_SP::write(24);
+                    GBS::VDS_DIS_VB_SP::write(31);
+                    GBS::VDS_DIS_VB_ST::write(527);
+                    GBS::IF_HB_ST2::write(0x47C);
+                    GBS::IF_HB_SP2::write(0x080);
+                    GBS::IF_VB_ST::write(14);
+                    GBS::IF_VB_SP::write(16);
+                } else {
+                    GBS::IF_HB_ST2::write(0x464);
+                    GBS::IF_HB_SP2::write(0x068);
+                    GBS::IF_VB_ST::write(6);
+                    GBS::IF_VB_SP::write(8);
+                }
+                GBS::PLLAD_FS::write(1); // PEGC requires High gain
+                latchPLLAD();
+            } else if (currentLines >= 420 && currentLines <= 470) {
+                // Normal DOS 400-line mode (24kHz vt: 439, 31kHz vt: 449)
+                if (rto->presetID == 0x1 || rto->presetID == 0x11) {        // 960p
+                    GBS::VDS_VSCALE::write(468);
+                } else if (rto->presetID == 0x5 || rto->presetID == 0x15) { // 1080p
+                    GBS::VDS_VSCALE::write(400);
+                } else if (rto->presetID == 0x4 || rto->presetID == 0x14) { // 480p
+                    // 400-line 1:1 pixel-perfect centering with 40-line letterbox borders
+                    GBS::VDS_VB_SP::write(64);
+                    GBS::VDS_DIS_VB_SP::write(72);
+                    GBS::VDS_DIS_VB_ST::write(488);
+                }
+                GBS::IF_HB_ST2::write(0x490);
+                GBS::IF_HB_SP2::write(0x094);
+                GBS::IF_VB_ST::write(6);
+                GBS::IF_VB_SP::write(8);
+                GBS::PLLAD_FS::write(0); // DOS Low Gain (24k/31k common, zero clipping)
+                latchPLLAD();
+            }
+            // For currentLines > 560 (e.g. SVGA 800x600 vt: 625..666, High-Res vt: ~800),
+            // retain base preset values and do not apply 480p stretch.
+        } else if (rto->videoStandardInput == 8 || rto->videoStandardInput == 14) { // Arcade 24kHz / Generic VGA
             uint32_t pllRate = 0;
             for (int i = 0; i < 8; i++) {
                 pllRate += getPllRate();
@@ -3594,21 +3801,10 @@ void doPostPresetLoadSteps()
                     GBS::PLLAD_FS::write(0); // then low gain
                 }
             }
-            GBS::PLLAD_ICP::write(6); // all 25khz submodes have more lines than NTSC
+            GBS::PLLAD_ICP::write(6);
             GBS::ADC_FLTR::write(1);  // 5_03
             GBS::IF_HB_ST::write(30); // 1_10; magic number
-            //GBS::IF_HB_ST2::write(0x60);  // 1_18
-            //GBS::IF_HB_SP2::write(0x88);  // 1_1a
             GBS::IF_HBIN_SP::write(0x60); // 1_26 works for all output presets
-            if (rto->presetID == 0x1) {   // out x960
-                GBS::VDS_VSCALE::write(410);
-            } else if (rto->presetID == 0x2) { // out x1024
-                GBS::VDS_VSCALE::write(402);
-            } else if (rto->presetID == 0x3) { // out 720p
-                GBS::VDS_VSCALE::write(546);
-            } else if (rto->presetID == 0x5) { // out 1080p
-                GBS::VDS_VSCALE::write(400);
-            }
         }
     }
 
@@ -3634,7 +3830,8 @@ void doPostPresetLoadSteps()
 
     if (rto->isCustomPreset) {
         // patch in segments not covered in custom preset files (currently seg 2)
-        if (rto->videoStandardInput == 3 || rto->videoStandardInput == 4 || rto->videoStandardInput == 8) {
+        if (rto->videoStandardInput == 3 || rto->videoStandardInput == 4 ||
+            rto->videoStandardInput == 8 || rto->videoStandardInput == VideoMode_PC98) {
             GBS::MADPT_Y_DELAY_UV_DELAY::write(1); // 2_17 : 1
         }
 
@@ -3762,7 +3959,9 @@ void doPostPresetLoadSteps()
     GBS::VDS_SYNC_EN::write(0);
     GBS::VDS_FLOCK_EN::write(0);
 
-    if (!rto->outModeHdBypass && rto->autoBestHtotalEnabled &&
+    applyPc98Timings();
+
+    if (!rto->outModeHdBypass && rto->autoBestHtotalEnabled && uopt->pc98Mode == 0 &&
         GBS::GBS_OPTION_SCALING_RGBHV::read() == 0 && !avoidAutoBest &&
         (rto->videoStandardInput >= 1 && rto->videoStandardInput <= 4)) {
         // autobesthtotal
@@ -3928,7 +4127,13 @@ void doPostPresetLoadSteps()
     }
 
     if (GBS::GBS_OPTION_SCALING_RGBHV::read() == 1) {
-        rto->videoStandardInput = 14;
+        if (uopt->pc98Mode > 0 || rto->videoStandardInput == VideoMode_PC98) {
+            rto->videoStandardInput = VideoMode_PC98;
+        } else if (rto->videoStandardInput == 8) {
+            rto->videoStandardInput = 8;
+        } else {
+            rto->videoStandardInput = 14;
+        }
     }
 
     if (GBS::GBS_OPTION_SCALING_RGBHV::read() == 0) {
@@ -4052,6 +4257,8 @@ void doPostPresetLoadSteps()
         SerialM.print(F("1080p 60Hz HDTV "));
     else if (rto->videoStandardInput == 8)
         SerialM.print(F("Medium Res "));
+    else if (rto->videoStandardInput == VideoMode_PC98)
+        SerialM.print(F("PC-98 "));
     else if (rto->videoStandardInput == 13)
         SerialM.print(F("VGA/SVGA/XGA/SXGA"));
     else if (rto->videoStandardInput == 14) {
@@ -4087,7 +4294,7 @@ void applyPresets(uint8_t result)
 
     // if RGBHV scaling and invoked through web ui or custom preset
     // need to know syncTypeCsync
-    if (result == 14) {
+    if (result == 14 || result == VideoMode_PC98 || (uopt->pc98Mode > 0 && rto->videoStandardInput == VideoMode_PC98)) {
         if (GBS::STATUS_SYNC_PROC_HSACT::read() == 1) {
             rto->inputIsYpBpR = 0;
             if (GBS::STATUS_SYNC_PROC_VSACT::read() == 0) {
@@ -4095,13 +4302,15 @@ void applyPresets(uint8_t result)
             } else {
                 rto->syncTypeCsync = 0;
             }
+        } else {
+            rto->syncTypeCsync = 0; // PC-98 RGBHV default
         }
     }
 
     boolean waitExtra = 0;
     if (rto->outModeHdBypass || rto->videoStandardInput == 15 || rto->videoStandardInput == 0) {
         waitExtra = 1;
-        if (result <= 4 || result == 14 || result == 8 || result == 9) {
+        if (result <= 4 || result == 14 || result == 8 || result == 9 || result == VideoMode_PC98) {
             GBS::SFTRST_IF_RSTZ::write(1); // early init
             GBS::SFTRST_VDS_RSTZ::write(1);
             GBS::SFTRST_DEC_RSTZ::write(1);
@@ -4123,7 +4332,12 @@ void applyPresets(uint8_t result)
         }
     }
 
-    if (result == 0) {
+    if (result == VideoMode_PC98 || (uopt->pc98Mode > 0 && rto->videoStandardInput == VideoMode_PC98)) {
+        result = VideoMode_PC98; // PC-98 preset (24kHz / 31kHz unified)
+        rto->inputIsYpBpR = 0;
+        rto->syncTypeCsync = 0; // PC-98 uses separate RGBHV sync
+        GBS::ADC_INPUT_SEL::write(1);
+    } else if (result == 0) {
         // Unknown
         SerialM.println(F("Source format not properly recognized, using fallback preset!"));
         result = 3;                   // in case of success: override to 480p60
@@ -4248,7 +4462,25 @@ void applyPresets(uint8_t result)
         return false;
     };
 
-    if (result == 1 || result == 3 || result == 8 || result == 9 || result == 14) {
+    if (uopt->pc98Mode > 0 && (result == VideoMode_PC98 || rto->videoStandardInput == VideoMode_PC98)) {
+#if defined(ESP8266)
+        if (uopt->presetPreference == OutputCustomized) {
+            const uint8_t *preset = loadPresetFromSPIFFS(result);
+            writeProgramArrayNew(preset, false);
+            if (applySavedBypassPreset()) {
+                return;
+            }
+        } else
+#endif
+        if (uopt->presetPreference == Output960P) {
+            writeProgramArrayNew(pc98_1280x960, false);
+        } else if (uopt->presetPreference == 1) {
+            writeProgramArrayNew(ntsc_720x480, false);
+        } else {
+            // Default / Output1080P: 1080p dedicated preset
+            writeProgramArrayNew(pc98_1920x1080, false);
+        }
+    } else if (result == 1 || result == 3 || result == 8 || result == 9 || result == 14 || result == VideoMode_PC98) {
         // NTSC input
         if (uopt->presetPreference == 0) {
             writeProgramArrayNew(ntsc_240p, false);
@@ -4359,6 +4591,12 @@ void freezeVideo()
 uint8_t getVideoMode()
 {
     uint8_t detectedMode = 0;
+
+    if (uopt->pc98Mode > 0) {
+        // PC-98 mode is enabled:
+        // As long as HSync is present, treat as PC-98 input regardless of resolution or line count.
+        return (GBS::STATUS_SYNC_PROC_HSACT::read() == 1) ? VideoMode_PC98 : 0;
+    }
 
     if (rto->videoStandardInput >= 14) { // check RGBHV first // not mode 13 here, else mode 13 can't reliably exit
         detectedMode = GBS::STATUS_16::read();
@@ -4536,8 +4774,12 @@ boolean getStatus00IfHsVsStable()
 // now just checks the chip status at 0_16 HS active (and Interrupt bit4 HS active for RGBHV)
 boolean getStatus16SpHsStable()
 {
+    if (rto->videoStandardInput == VideoMode_PC98) {
+        return (GBS::STATUS_SYNC_PROC_HSACT::read() == 1);
+    }
+
     if (rto->videoStandardInput == 15) { // check RGBHV first
-        if (GBS::STATUS_INT_INP_NO_SYNC::read() == 0) {
+        if (GBS::STATUS_INT_INP_NO_SYNC::read() == 0 && GBS::STATUS_SYNC_PROC_HSACT::read() == 1) {
             return true;
         } else {
             resetInterruptNoHsyncBadBit();
@@ -4565,7 +4807,9 @@ void setOverSampleRatio(uint8_t newRatio, boolean prepareOnly)
 {
     uint8_t ks = GBS::PLLAD_KS::read();
 
-    bool hi_res = rto->videoStandardInput == 8 || rto->videoStandardInput == 4 || rto->videoStandardInput == 3;
+    bool hi_res = rto->videoStandardInput == 8 || rto->videoStandardInput == 4 ||
+                  rto->videoStandardInput == 3 || rto->videoStandardInput == 14 ||
+                  rto->videoStandardInput == VideoMode_PC98;
     bool bypass = rto->presetID == PresetHdBypass;
 
     switch (newRatio) {
@@ -6511,27 +6755,29 @@ void runSyncWatcher()
                     float sourceRate = getSourceFieldRate(1);
                     Serial.println(sourceRate);
 
-                    // todo: this hack is hard to understand when looking at applypreset and mode is suddenly 1,2 or 3
-                    if (uopt->presetPreference == 2) {
+                    if (uopt->pc98Mode > 0) {
+                        rto->videoStandardInput = VideoMode_PC98; // PC-98 unified standard
+                        SerialM.println(F("PC-98 mode active!"));
+                    } else if (uopt->presetPreference == 2) {
                         // custom preset defined, try to load (set mode = 14 here early)
                         rto->videoStandardInput = 14;
                     } else {
-                        if (sourceLines < 280) {
-                            // this is "NTSC like?" check, seen 277 lines in "512x512 interlaced (emucrt)"
-                            rto->videoStandardInput = 1;
-                        } else if (sourceLines < 380) {
-                            // this is "PAL like?" check, seen vt:369 (MDA mode)
-                            rto->videoStandardInput = 2;
-                        } else if (sourceRate > 44.0f && sourceRate < 53.8f) {
-                            // not low res but PAL = "EDTV"
-                            rto->videoStandardInput = 4;
-                            needPostAdjust = 1;
-                        } else { // sourceRate > 53.8f
-                            // "60Hz EDTV"
-                            rto->videoStandardInput = 3;
-                            needPostAdjust = 1;
+                            if (sourceLines < 280) {
+                                // this is "NTSC like?" check, seen 277 lines in "512x512 interlaced (emucrt)"
+                                rto->videoStandardInput = 1;
+                            } else if (sourceLines < 380) {
+                                // this is "PAL like?" check, seen vt:369 (MDA mode)
+                                rto->videoStandardInput = 2;
+                            } else if (sourceRate > 44.0f && sourceRate < 53.8f) {
+                                // not low res but PAL = "EDTV"
+                                rto->videoStandardInput = 4;
+                                needPostAdjust = 1;
+                            } else { // sourceRate > 53.8f
+                                // "60Hz EDTV" (640x480 standard VGA / Graphic Accelerator)
+                                rto->videoStandardInput = 3;
+                                needPostAdjust = 1;
+                            }
                         }
-                    }
 
                     if (uopt->presetPreference == 10) {
                         uopt->presetPreference = Output960P; // fix presetPreference which can be "bypass"
@@ -6548,12 +6794,14 @@ void runSyncWatcher()
                     GBS::SP_SDCS_VSSP_REG_L::write(0); // 5_40
 
                     rto->coastPositionIsSet = rto->clampPositionIsSet = 0;
-                    rto->videoStandardInput = 14;
+                    if (uopt->pc98Mode == 0) {
+                        rto->videoStandardInput = 14;
 
-                    if (GBS::PLLAD_ICP::read() >= 6) {
-                        GBS::PLLAD_ICP::write(5); // reduce charge pump current for more general use
-                        latchPLLAD();
-                        delay(40);
+                        if (GBS::PLLAD_ICP::read() >= 6) {
+                            GBS::PLLAD_ICP::write(5); // reduce charge pump current for more general use
+                            latchPLLAD();
+                            delay(40);
+                        }
                     }
 
                     updateSpDynamic(1);
@@ -6613,17 +6861,104 @@ void runSyncWatcher()
                     }
                 }
             }
+            else if (uopt->pc98Mode > 0 && rto->videoStandardInput == VideoMode_PC98) {
+                // PC-98 Dynamic resolution switch (400-line DOS <-> 480-line PEGC / Windows)
+                // Normalize double-rate VTOTAL (800..1150)
+                if (sourceLines >= 800 && sourceLines <= 1150) {
+                    sourceLines /= 2;
+                }
+                // Filter out sync jitter and unstable values by requiring 5 consecutive stable samples
+                static uint16_t lastPc98SourceLines = 0;
+                static uint8_t lastPresetID = 0xFF;
+                static uint16_t candidatePc98Lines = 0;
+                static uint8_t pc98StableSamples = 0;
+
+                // Only consider valid signal ranges: 400-line DOS (420..470) or 480-line PEGC (490..560)
+                if ((sourceLines >= 420 && sourceLines <= 470) || (sourceLines >= 490 && sourceLines <= 560)) {
+                    if (abs((int)sourceLines - (int)lastPc98SourceLines) > 15 || rto->presetID != lastPresetID || pc98NeedsReapply) {
+                        if (candidatePc98Lines != 0 && abs((int)sourceLines - (int)candidatePc98Lines) <= 5) {
+                            pc98StableSamples++;
+                            if (pc98StableSamples >= 5) {
+                                lastPc98SourceLines = sourceLines;
+                                lastPresetID = rto->presetID;
+                                pc98NeedsReapply = false;
+                                pc98StableSamples = 0;
+                                candidatePc98Lines = 0;
+
+                                if (sourceLines >= 490 && sourceLines <= 560) {
+                                    // 480-line PEGC / Windows VGA (vt ≒ 525)
+                                    if (rto->presetID == 0x05 || rto->presetID == 0x15) { // 1080p
+                                        GBS::VDS_VSCALE::write(480);
+                                        GBS::IF_HB_ST2::write(0x464);
+                                        GBS::IF_HB_SP2::write(0x068);
+                                        GBS::IF_VB_ST::write(6);
+                                        GBS::IF_VB_SP::write(8);
+                                    } else if (rto->presetID == 0x01 || rto->presetID == 0x11) { // 960p
+                                        GBS::VDS_VSCALE::write(562);
+                                        GBS::IF_HB_ST2::write(0x470);
+                                        GBS::IF_HB_SP2::write(0x074);
+                                        GBS::IF_VB_ST::write(6);
+                                        GBS::IF_VB_SP::write(8);
+                                    } else if (rto->presetID == 0x04 || rto->presetID == 0x14) { // 480p
+                                        // 480-line PEGC: full 480 vertical height
+                                        GBS::VDS_VB_SP::write(24);
+                                        GBS::VDS_DIS_VB_SP::write(31);
+                                        GBS::VDS_DIS_VB_ST::write(527);
+                                        GBS::IF_HB_ST2::write(0x47C);
+                                        GBS::IF_HB_SP2::write(0x080);
+                                        GBS::IF_VB_ST::write(14);
+                                        GBS::IF_VB_SP::write(16);
+                                    } else {
+                                        GBS::IF_HB_ST2::write(0x464);
+                                        GBS::IF_HB_SP2::write(0x068);
+                                        GBS::IF_VB_ST::write(6);
+                                        GBS::IF_VB_SP::write(8);
+                                    }
+                                    GBS::PLLAD_FS::write(1); // PEGC High Gain
+                                    latchPLLAD();
+                                    SerialM.println(F("PC-98 dynamic scale updated: 480p (PEGC)"));
+                                } else if (sourceLines >= 420 && sourceLines <= 470) {
+                                    // 400-line DOS (24kHz vt ≒ 439 / 31kHz vt ≒ 449)
+                                    if (rto->presetID == 0x05 || rto->presetID == 0x15) {
+                                        GBS::VDS_VSCALE::write(400);
+                                    } else if (rto->presetID == 0x01 || rto->presetID == 0x11) {
+                                        GBS::VDS_VSCALE::write(468);
+                                    } else if (rto->presetID == 0x04 || rto->presetID == 0x14) {
+                                        // 400-line DOS: 1:1 pixel-perfect centering with letterbox borders
+                                        GBS::VDS_VB_SP::write(64);
+                                        GBS::VDS_DIS_VB_SP::write(72);
+                                        GBS::VDS_DIS_VB_ST::write(488);
+                                    }
+                                    GBS::IF_HB_ST2::write(0x490);
+                                    GBS::IF_HB_SP2::write(0x094);
+                                    GBS::IF_VB_ST::write(6);
+                                    GBS::IF_VB_SP::write(8);
+                                    GBS::PLLAD_FS::write(0); // DOS Low Gain (24k/31k common, zero clipping)
+                                    latchPLLAD();
+                                    SerialM.println(F("PC-98 dynamic scale updated: 400p (DOS)"));
+                                }
+                            }
+                        } else {
+                            candidatePc98Lines = sourceLines;
+                            pc98StableSamples = 1;
+                        }
+                    } else {
+                        // lines matched current active mode, reset candidate tracking
+                        candidatePc98Lines = 0;
+                        pc98StableSamples = 0;
+                    }
+                }
+            }
             // if currently in scaling RGB/HV, check for "SD" < > "EDTV" style source changes
             else if ((sourceLines <= 535 && sourceLines != 0) && rto->videoStandardInput == 14) {
-                // todo: custom presets?
-                if (sourceLines < 280 && activePresetLineCount > 280) {
-                    rto->videoStandardInput = 1;
-                } else if (sourceLines < 380 && activePresetLineCount > 380) {
-                    rto->videoStandardInput = 2;
-                } else if (sourceLines > 380 && activePresetLineCount < 380) {
-                    rto->videoStandardInput = 3;
-                    needPostAdjust = 1;
-                }
+                    if (sourceLines < 280 && activePresetLineCount > 280) {
+                        rto->videoStandardInput = 1;
+                    } else if (sourceLines < 380 && activePresetLineCount > 380) {
+                        rto->videoStandardInput = 2;
+                    } else if (sourceLines > 380 && activePresetLineCount < 380) {
+                        rto->videoStandardInput = 3;
+                        needPostAdjust = 1;
+                    }
 
                 if (rto->videoStandardInput != 14) {
                     // check thoroughly first
@@ -6699,7 +7034,7 @@ void runSyncWatcher()
                         }
 
                         // note: this is all duplicated above. unify!
-                        if (needPostAdjust) {
+                        if (needPostAdjust && uopt->pc98Mode == 0) {
                             // base preset was "3" / no line doubling
                             // info: actually the position needs to be adjusted based on hor. freq or "h:" value (todo!)
                             GBS::IF_HB_ST2::write(0x08);  // patches
@@ -6731,7 +7066,7 @@ void runSyncWatcher()
                 }
             }
             // check whether to revert back to full bypass
-            else if ((sourceLines > 535) && rto->videoStandardInput == 14) {
+            else if ((sourceLines > 535) && rto->videoStandardInput == 14 && uopt->pc98Mode == 0) {
                 uint16_t firstDetectedSourceLines = sourceLines;
                 boolean moveOn = 1;
                 for (int i = 0; i < 30; i++) {
@@ -6756,7 +7091,7 @@ void runSyncWatcher()
             }
         } // done preferScalingRgbhv
 
-        if (!uopt->preferScalingRgbhv && rto->videoStandardInput == 14) {
+        if (!uopt->preferScalingRgbhv && rto->videoStandardInput == 14 && uopt->pc98Mode == 0) {
             // user toggled the web ui button / revert scaling rgbhv
             rto->videoStandardInput = 15;
             rto->isValidForScalingRGBHV = false;
@@ -6784,9 +7119,13 @@ void runSyncWatcher()
             }
             limitNoSync = 200; // 100
         } else {
-            VSHSStatus = GBS::STATUS_16::read();
-            // this status usually updates when a source goes off
-            stable = ((VSHSStatus & 0x0a) == 0x0a); // RGBHV > check h+v from 0_16
+            if (rto->videoStandardInput == VideoMode_PC98) {
+                stable = (GBS::STATUS_SYNC_PROC_HSACT::read() == 1);
+            } else {
+                VSHSStatus = GBS::STATUS_16::read();
+                // this status usually updates when a source goes off
+                stable = ((VSHSStatus & 0x0a) == 0x0a); // RGBHV > check h+v from 0_16
+            }
             limitNoSync = 300;
         }
 
@@ -7130,6 +7469,7 @@ void loadDefaultUserOptions()
     uopt->enableCalibrationADC = 1;          // #17
     uopt->scanlineStrength = 0x30;           // #18
     uopt->disableExternalClockGenerator = 0; // #19
+    uopt->pc98Mode = 0;                      // #20 (0 - Off, 1 - On)
 }
 
 #if !ENABLE_WIFI
@@ -7443,6 +7783,14 @@ void setup()
             if (uopt->disableExternalClockGenerator > 1)
                 uopt->disableExternalClockGenerator = 0;
 
+            if (f.available()) {
+                uopt->pc98Mode = (uint8_t)(f.read() - '0'); // #20
+                if (uopt->pc98Mode > 1)
+                    uopt->pc98Mode = 1;
+            } else {
+                uopt->pc98Mode = 0;
+            }
+
             f.close();
         }
     }
@@ -7750,6 +8098,9 @@ void updateWebSocketData()
             if (uopt->disableExternalClockGenerator) {
                 toSend[5] |= (1 << 2);
             }
+            if (uopt->pc98Mode > 0) {
+                toSend[5] |= (1 << 3);
+            }
 
             // send ping and stats
             if (ESP.getFreeHeap() > 14000) {
@@ -8016,8 +8367,13 @@ void loop()
                 saveUserPrefs();
                 break;
             case 'e':
-                writeProgramArrayNew(ntsc_240p, false);
+                if (rto->videoStandardInput == VideoMode_PC98) {
+                    writeProgramArrayNew(pc98_1280x960, false);
+                } else {
+                    writeProgramArrayNew(ntsc_240p, false);
+                }
                 doPostPresetLoadSteps();
+                printVideoTimings();
                 break;
             case 'r':
                 writeProgramArrayNew(pal_240p, false);
@@ -8650,12 +9006,22 @@ void loop()
                 SerialM.println((if_hblank_scale_stop - 1), HEX);
             } break;
             case '(': {
-                writeProgramArrayNew(ntsc_1920x1080, false);
+                if (rto->videoStandardInput == VideoMode_PC98) {
+                    writeProgramArrayNew(pc98_1920x1080, false);
+                } else {
+                    writeProgramArrayNew(ntsc_1920x1080, false);
+                }
                 doPostPresetLoadSteps();
+                printVideoTimings();
             } break;
             case ')': {
-                writeProgramArrayNew(pal_1920x1080, false);
+                if (rto->videoStandardInput == VideoMode_PC98) {
+                    writeProgramArrayNew(pc98_1280x960, false);
+                } else {
+                    writeProgramArrayNew(pal_1920x1080, false);
+                }
                 doPostPresetLoadSteps();
+                printVideoTimings();
             } break;
             case 'V': {
                 SerialM.print(F("step response "));
@@ -8723,7 +9089,7 @@ void loop()
     }
 
     // run FrameTimeLock if enabled
-    if (uopt->enableFrameTimeLock && rto->sourceDisconnected == false && rto->autoBestHtotalEnabled &&
+    if (uopt->enableFrameTimeLock && uopt->pc98Mode == 0 && rto->sourceDisconnected == false && rto->autoBestHtotalEnabled &&
         rto->syncWatcherEnabled && FrameSync::ready() && millis() - lastVsyncLock > FrameSyncAttrs::lockInterval && rto->continousStableCounter > 20 && rto->noSyncCounter == 0)
     {
         uint16_t htotal = GBS::STATUS_SYNC_PROC_HTOTAL::read();
@@ -9053,7 +9419,16 @@ void handleType2Command(char argument)
             saveUserPrefs();
             break;
         case '9':
-            //
+            if (uopt->pc98Mode > 0) {
+                uopt->pc98Mode = 0;
+                SerialM.println(F("PC-98 mode: off"));
+            } else {
+                uopt->pc98Mode = 1;
+                rto->videoStandardInput = VideoMode_PC98;
+                SerialM.println(F("PC-98 mode: on"));
+            }
+            saveUserPrefs();
+            applyPresets(uopt->pc98Mode > 0 ? VideoMode_PC98 : rto->videoStandardInput);
             break;
         case 'a':
 #if ENABLE_WIFI
@@ -10075,6 +10450,8 @@ const uint8_t *loadPresetFromSPIFFS(byte forVideoMode)
         f = SPIFFS.open("/preset_ntsc_1080p." + String((char)slot), "r");
     } else if (forVideoMode == 8) {
         f = SPIFFS.open("/preset_medium_res." + String((char)slot), "r");
+    } else if (forVideoMode == VideoMode_PC98) {
+        f = SPIFFS.open("/preset_pc98." + String((char)slot), "r");
     } else if (forVideoMode == 14) {
         f = SPIFFS.open("/preset_vga_upscale." + String((char)slot), "r");
     } else if (forVideoMode == 0) {
@@ -10083,7 +10460,9 @@ const uint8_t *loadPresetFromSPIFFS(byte forVideoMode)
 
     if (!f) {
         SerialM.println(F("no preset file for this slot and source"));
-        if (forVideoMode == 2 || forVideoMode == 4)
+        if (forVideoMode == VideoMode_PC98)
+            return pc98_1920x1080;
+        else if (forVideoMode == 2 || forVideoMode == 4)
             return pal_240p;
         else
             return ntsc_240p;
@@ -10144,6 +10523,8 @@ void savePresetToSPIFFS()
         f = SPIFFS.open("/preset_ntsc_1080p." + String((char)slot), "w");
     } else if (rto->videoStandardInput == 8) {
         f = SPIFFS.open("/preset_medium_res." + String((char)slot), "w");
+    } else if (rto->videoStandardInput == VideoMode_PC98) {
+        f = SPIFFS.open("/preset_pc98." + String((char)slot), "w");
     } else if (rto->videoStandardInput == 14) {
         f = SPIFFS.open("/preset_vga_upscale." + String((char)slot), "w");
     } else if (rto->videoStandardInput == 0) {
@@ -10248,6 +10629,7 @@ void saveUserPrefs()
     f.write(uopt->enableCalibrationADC + '0');          // #17
     f.write(uopt->scanlineStrength + '0');              // #18
     f.write(uopt->disableExternalClockGenerator + '0'); // #19
+    f.write(uopt->pc98Mode + '0');                      // #20
 
 
     f.close();
